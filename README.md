@@ -1,7 +1,12 @@
 # Swire Coca-Cola Project
 
 ## Objective Summary
-  - HomeCredit Inc. aims to identify high-risk customers who are likely to default on their loans, as well as identify low-risk customers who have little to no line of credit.  The objective of this project is to construct predictive models using historical data to distinguish customers based on their ability to repay their loan.
+  - Swire Coca-Cola faces an issue with identifying customers, brands, and clients in their book of business to offload to White Truck services within their Western USA market. Businesses currently on Red Truck services take up a lot of resources.  Additionally, there is a need to segment and profile customers who purchase below 400 gallons per year to guide strategic outreach. Thus, we aim to identify who and who not to offload onto the White Truck services.
+  - The primary objective of this project is to build a predictive and descriptive modeling framework that:
+    - Identifies customer segments with consistently low ordering volumes.
+    - Predicts whether a customer is likely to purchase fewer than 400 gallons in Year 2.
+    - Explores operational and demographic characteristics (e.g., LMP status, CO2 status, delivery channels) to uncover behavioral patterns.
+    - Supports targeted engagement strategies by clustering customers based on ordering behavior and profile.
 ## Solution 
   - Utilizing an XGBoost model, expanded HomeCredit's customer base to customers that were predicted to not default on loans, even with a sparse credit history.  Additionally, used a random forest model to identify customers who were at high risk for defaulting to reduce business costs.
 ## Personal Contribution 
