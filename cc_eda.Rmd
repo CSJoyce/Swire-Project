@@ -1,0 +1,448 @@
+---
+title: "CC EDA"
+author: "Chris Joyce"
+date: "2025"
+output: 
+  html_document:
+    number_sections: false
+    toc: true
+    toc_depth: 2
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+library(tidyverse)
+library(skimr)
+library(tableone)
+library(forecast)
+library(tseries)
+library(astsa)
+library(xts)
+library(C50)
+library(tidymodels)
+library(xgboost)
+library(caret)
+library(future)
+library(lubridate)
+plan(multisession, workers = 6)
+```
+
+# Objective
+
+### The objective of this notebook is to provide exploratory insights into the historical data pertaining to Swire Coca Cola.  The contents consist of preliminary data preparation steps and transformations intended to provide usable data for analytical usage, and discover patterns or attributes of interest within the data to aid in solving the presented business problem.  Descriptions of steps and deductive statements are provided as needed.
+
+
+# Load in and Prep
+
+
+```{r, warning=FALSE}
+setwd("F:/Lori/Downloads")
+td <- read.csv('transactional_data.csv')
+cust <- read.csv('customer_profile.csv')
+cust_a <- read.csv('customer_address_and_zip_mapping.csv')
+cost <- read.csv('delivery_cost_data.csv')
+m <- read.csv('merged_data.csv')
+```
+
+```{r}
+str(td)
+summary(td)
+head(td, 50)
+td$ORDER_TYPE <- td$ORDER_TYPE %>% factor()
+```
+
+```{r}
+skim(td)
+```
+
+```{r}
+# Unique Customers
+cust_chrs <- cust[, c(3,6,7,8)]
+cust_chrs <- lapply(cust_chrs, as.factor)
+cust_chrs <- as.data.frame(cust_chrs)
+cust <- cbind(cust[, -c(3,6,7,8)], cust_chrs)
+```
+
+```{r}
+cust <- cust %>% rename(zip = ZIP_CODE)
+str(cust)
+```
+
+```{r}
+skim(cust)
+```
+
+```{r}
+# Unique Zips
+str(cust_a)
+```
+
+```{r}
+cust_a
+```
+
+```{r}
+custs_match <- merge(cust, cust_a, by = "zip")
+```
+
+```{r}
+str(custs_match) # customers with full address info. no rows lost
+```
+
+```{r}
+skim(custs_match)
+```
+
+```{r}
+# 12,282 belong to PG
+custs_match |>
+  group_by(PRIMARY_GROUP_NUMBER)|>
+  arrange(PRIMARY_GROUP_NUMBER) |>
+  na.omit()
+```
+
+```{r}
+cost
+```
+
+```{r}
+cost$Median.Delivery.Cost <- gsub("\\$", "", cost$Median.Delivery.Cost)
+cost$Median.Delivery.Cost <- as.numeric(cost$Median.Delivery.Cost)
+```
+
+```{r}
+split_vol_range <- function(range) {
+  if (range == "1350+") {
+    return(c(1350, NA))
+  } else {
+    parts <- strsplit(range, " - ")[[1]]
+    return(as.numeric(parts))
+  }
+}
+```
+
+```{r}
+vol_ranges <- t(sapply(cost$Vol.Range, split_vol_range))
+cost$Vol.Range.Min <- vol_ranges[, 1]
+cost$Vol.Range.Max <- vol_ranges[, 2]
+cost <- cost |>
+  mutate(Vol.Range.Max = if_else(Vol.Range.Min == 1350, 1350, Vol.Range.Max))
+```
+
+```{r}
+cost <- cost |>
+  rename(COLD_DRINK_CHANNEL = Cold.Drink.Channel)
+```
+
+```{r}
+cost
+```
+
+```{r}
+# Matching orders to customers
+cust_tot <- merge(custs_match, td, on = "CUSTOMER_NUMBER")
+```
+
+```{r}
+# Removing negative order volumes
+cust_tot <- cust_tot |>
+  mutate(DELIVERED_CASES = ifelse(DELIVERED_CASES < 0, 0, DELIVERED_CASES),
+         ORDERED_CASES = ifelse(ORDERED_CASES < 0, 0, ORDERED_CASES),
+         LOADED_CASES = ifelse(LOADED_CASES < 0, 0, LOADED_CASES),
+         ORDERED_GALLONS = ifelse(ORDERED_GALLONS < 0, 0, ORDERED_GALLONS),
+         LOADED_GALLONS = ifelse(LOADED_GALLONS < 0, 0, LOADED_GALLONS),
+         DELIVERED_GALLONS = ifelse(DELIVERED_GALLONS < 0, 0, DELIVERED_GALLONS))
+```
+
+```{r}
+#cust_combi <- merge(cust_tot, cost, on = "COLD_DRINK_CHANNEL")
+```
+
+```{r}
+str(cust_tot)
+```
+
+```{r}
+summary(cust_tot)
+```
+
+```{r}
+skim(cust_tot)
+```
+
+```{r}
+head(cust_tot)
+```
+
+
+# EDA
+
+
+```{r}
+ggplot(data = cust_tot, 
+       aes(x = ORDER_TYPE)) + 
+  geom_bar() +
+  labs(title = "Count of Order Types")
+```
+
+```{r}
+distribution <- table(cust_tot$FREQUENT_ORDER_TYPE)
+
+prop.table(distribution) * 100
+```
+
+```{r}
+distribution <- table(cust_tot$TRADE_CHANNEL)
+
+prop.table(distribution) * 100
+```
+
+```{r}
+distribution <- table(cust_tot$SUB_TRADE_CHANNEL)
+
+prop.table(distribution) * 100
+```
+
+```{r}
+# Distribution of cold drink channel orders
+ggplot(data = cust_tot, 
+       aes(x = COLD_DRINK_CHANNEL)) + 
+  geom_bar() +
+  labs(title = "Count") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_discrete(drop = FALSE) 
+```
+
+```{r}
+# Verify low conventional count
+cust_tot |>
+  filter(COLD_DRINK_CHANNEL == "CONVENTIONAL")
+cust_tot |>
+  filter(COLD_DRINK_CHANNEL == "CONVENTIONAL") |>
+  count(CUSTOMER_NUMBER) |>
+  arrange(desc(n))
+```
+
+```{r}
+# Trade Channel Frequency of Orders
+cust_tot |>
+  group_by(TRADE_CHANNEL) |>
+  count() |>
+  arrange(desc(n))
+```
+
+```{r}
+# Sub Trade Channel Frequency of Orders
+cust_tot |>
+  group_by(SUB_TRADE_CHANNEL) |>
+  count() |>
+  arrange(desc(n))
+```
+
+```{r}
+# Frequent Order Type Frequency of Orders
+cust_tot |>
+  group_by(FREQUENT_ORDER_TYPE) |>
+  count() |>
+  arrange(desc(n))
+```
+
+```{r}
+# Composition of trade channels
+TRADE_CHANNELS <- unique(cust_tot$TRADE_CHANNEL)
+
+for (channel in TRADE_CHANNELS) {
+  df <- cust_tot |>
+    select(TRADE_CHANNEL, SUB_TRADE_CHANNEL) |>
+    filter(TRADE_CHANNEL == channel) |>
+    distinct(SUB_TRADE_CHANNEL) |>
+    mutate(TRADE_CHANNEL = channel)
+  
+  assign(paste0("df_", gsub(" ", "_", channel)), df)
+  print(df)
+}
+```
+
+```{r}
+# Distribution of Customers Belonging to a Primary Group
+cust_tot$PRIMARY_GROUP_STATUS <- ifelse(is.na(cust_tot$PRIMARY_GROUP_NUMBER), "NA", "Not NA")
+vars = c("LOCAL_MARKET_PARTNER", "CO2_CUSTOMER")
+groups = "PRIMARY_GROUP_STATUS"
+pgroup_table <- CreateTableOne(vars = vars, strata = groups, data = cust_tot)
+pgroup_table
+```
+
+```{r}
+# Creating bins for single order volumes
+cust_tot_mod <- cust_tot |>
+  filter(ORDERED_CASES <= 10 & ORDERED_CASES > 0, ORDERED_GALLONS <= 10 & ORDERED_GALLONS > 0)
+cust_tot_mod2 <- cust_tot |>
+  filter(ORDERED_CASES > 10 & ORDERED_CASES <= 50, ORDERED_GALLONS > 10 & ORDERED_GALLONS <= 50)
+cust_tot_mod3 <- cust_tot |>
+  filter(ORDERED_CASES > 50, ORDERED_GALLONS > 50)
+```
+
+```{r}
+cust_tot_long <- cust_tot_mod %>%
+  pivot_longer(cols = c(ORDERED_CASES, ORDERED_GALLONS), names_to = "Order_Type", values_to = "Value")
+cust_tot_long2 <- cust_tot_mod2 %>%
+  pivot_longer(cols = c(ORDERED_CASES, ORDERED_GALLONS), names_to = "Order_Type", values_to = "Value")
+cust_tot_long3 <- cust_tot_mod3 %>%
+  pivot_longer(cols = c(ORDERED_CASES, ORDERED_GALLONS), names_to = "Order_Type", values_to = "Value")
+```
+
+```{r}
+ggplot(data = cust_tot_long, aes(x = Value, fill = Order_Type)) +
+  geom_histogram(bins = 5, position = "dodge") +
+  facet_wrap(~ Order_Type) +
+  labs(title = "Histogram for Small Orders",
+       x = "Order Amount",
+       y = "Count") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data = cust_tot_long2, aes(x = Value, fill = Order_Type)) +
+  geom_histogram(bins = 5, position = "dodge") +
+  facet_wrap(~ Order_Type) +
+  labs(title = "Histogram for Medium Orders",
+       x = "Order Amount",
+       y = "Count") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data = cust_tot_long3, aes(x = Value, fill = Order_Type)) +
+  geom_histogram(position = "dodge", binwidth = 500, bins = 5) +
+  facet_wrap(~ Order_Type) +
+  labs(title = "Histogram for Large Orders",
+       x = "Order Amount",
+       y = "Count") +
+  theme_minimal()
+```
+
+```{r}
+# Average orders for different trade channels
+order_dists_all <- cust_tot |>
+  group_by(TRADE_CHANNEL) |>
+  summarize(gallon_avg = mean(ORDERED_GALLONS), case_avg = mean(ORDERED_CASES), total_avg = case_avg + gallon_avg,
+            case_ratio = case_avg / total_avg, gallon_ratio = gallon_avg / total_avg) |>
+  arrange(desc(total_avg))
+order_dists_all
+```
+
+```{r}
+# Number of customers belonging to each primary
+cust_tot %>%
+  group_by(PRIMARY_GROUP_NUMBER) %>%
+  summarise(count = n_distinct(CUSTOMER_NUMBER),
+            case_avg = mean(ORDERED_CASES),
+            gal_avg = mean(ORDERED_GALLONS),
+            trade_channels = paste(unique(TRADE_CHANNEL),
+            collapse = ", ")) %>%
+  arrange(desc(count))
+```
+
+```{r}
+cust_tot |>
+  select(TRADE_CHANNEL, COLD_DRINK_CHANNEL) |>
+  filter(COLD_DRINK_CHANNEL == "CONVENTIONAL")
+```
+
+```{r}
+# Type casting
+m_chrs <- m[, c(5, 13, 16, 17, 18)]
+m_chrs <- lapply(m_chrs, as.factor)
+m_chrs <- as.data.frame(m_chrs)
+
+m[, c(5, 13, 16, 17, 18)] <- m_chrs
+
+m_log <- m[, c(19, 20)]
+m_log <- lapply(m_log, as.logical)
+m_log <- as.data.frame(m_log)
+
+m[, c(19, 20)] <- m_log
+```
+
+```{r}
+str(m)
+```
+
+```{r}
+# LMP analysis
+LMP_distinct <- m |>
+  filter(LOCAL_MARKET_PARTNER == TRUE, CO2_CUSTOMER == FALSE, ORDERED_CASES == 0, LOADED_CASES == 0, DELIVERED_CASES == 0)
+  #summarize(case_avg = mean(ORDERED_CASES), gallon_avg = mean(ORDERED_GALLONS), total_avg = case_avg + gallon_avg) |>
+  #arrange(case_avg)
+LMP_distinct
+```
+
+### There are 64,135 orders for local market partners who exclusively order gallons.  This is one of the distinct customer groups of interest for the business problem.
+
+```{r}
+# Trade channel averages for LMP customers
+order_dists_lmp <- LMP_distinct |>
+  group_by(TRADE_CHANNEL) |>
+  summarize(gallon_avg = mean(ORDERED_GALLONS)) |>
+  arrange(desc(gallon_avg))
+order_dists_lmp
+```
+
+```{r}
+str(m)
+```
+
+```{r}
+# Individual customer orders for each year in LMP group
+g1 <- LMP_distinct |>
+  select(CUSTOMER_NUMBER, zip, PRIMARY_GROUP_NUMBER, LOCAL_MARKET_PARTNER, FREQUENT_ORDER_TYPE, COLD_DRINK_CHANNEL,
+         TRADE_CHANNEL, SUB_TRADE_CHANNEL, TRANSACTION_DATE, ORDERED_CASES, ORDERED_GALLONS, Month, Has.Primary.Group.Number., YEAR) |>
+  group_by(CUSTOMER_NUMBER, YEAR) |>
+  summarise(TOTAL_YEAR_ORDERS = sum(ORDERED_CASES + ORDERED_GALLONS, na.rm = TRUE),
+            zip = first(zip),
+            PRIMARY_GROUP_NUMBER = first(PRIMARY_GROUP_NUMBER),
+            LOCAL_MARKET_PARTNER = first(LOCAL_MARKET_PARTNER),
+            FREQUENT_ORDER_TYPE = first(FREQUENT_ORDER_TYPE),
+            COLD_DRINK_CHANNEL = first(COLD_DRINK_CHANNEL),
+            TRADE_CHANNEL = first(TRADE_CHANNEL),
+            SUB_TRADE_CHANNEL = first(SUB_TRADE_CHANNEL),
+            TRANSACTION_DATE = first(TRANSACTION_DATE),
+            Month = first(Month),
+            Has.Primary.Group.Number. = first(Has.Primary.Group.Number.),
+            .groups = 'drop') |>
+  ungroup()
+
+g1
+```
+
+```{r}
+# Individual customer orders for each year (all customers)
+g2 <- m |>
+  select(CUSTOMER_NUMBER, zip, PRIMARY_GROUP_NUMBER, LOCAL_MARKET_PARTNER, CO2_CUSTOMER, FREQUENT_ORDER_TYPE, COLD_DRINK_CHANNEL,
+         TRADE_CHANNEL, SUB_TRADE_CHANNEL, TRANSACTION_DATE, ORDERED_CASES, ORDERED_GALLONS, Month, Has.Primary.Group.Number., YEAR) |>
+  group_by(CUSTOMER_NUMBER, YEAR) |>
+  summarise(TOTAL_YEAR_ORDERS = sum(ORDERED_CASES + ORDERED_GALLONS, na.rm = TRUE),
+            zip = first(zip),
+            PRIMARY_GROUP_NUMBER = first(PRIMARY_GROUP_NUMBER),
+            LOCAL_MARKET_PARTNER = first(LOCAL_MARKET_PARTNER),
+            CO2_CUSTOMER = first(CO2_CUSTOMER),
+            FREQUENT_ORDER_TYPE = first(FREQUENT_ORDER_TYPE),
+            COLD_DRINK_CHANNEL = first(COLD_DRINK_CHANNEL),
+            TRADE_CHANNEL = first(TRADE_CHANNEL),
+            SUB_TRADE_CHANNEL = first(SUB_TRADE_CHANNEL),
+            TRANSACTION_DATE = first(TRANSACTION_DATE),
+            Month = first(Month),
+            Has.Primary.Group.Number. = first(Has.Primary.Group.Number.),
+            .groups = 'drop') |>
+  ungroup()
+
+g2
+```
+
+
+
+
+
+
